@@ -6,6 +6,18 @@ package modload
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
+	"go/build"
+	"internal/lazyregexp"
+	"io/ioutil"
+	"os"
+	"path"
+	"path/filepath"
+	"runtime/debug"
+	"strconv"
+	"strings"
+
 	"cmd/go/internal/base"
 	"cmd/go/internal/cache"
 	"cmd/go/internal/cfg"
@@ -18,22 +30,11 @@ import (
 	"cmd/go/internal/mvs"
 	"cmd/go/internal/renameio"
 	"cmd/go/internal/search"
-	"encoding/json"
-	"fmt"
-	"go/build"
-	"internal/lazyregexp"
-	"io/ioutil"
-	"os"
-	"path"
-	"path/filepath"
-	"runtime/debug"
-	"strconv"
-	"strings"
 )
 
 var (
 	cwd            string // TODO(bcmills): Is this redundant with base.Cwd?
-	mustUseModules = true
+	mustUseModules = false
 	initialized    bool
 
 	modRoot     string
@@ -78,8 +79,6 @@ func BinDir() string {
 	return filepath.Join(gopath, "bin")
 }
 
-var inGOPATH bool // running in GOPATH/src
-
 // Init determines whether module mode is enabled, locates the root of the
 // current module (if any), sets environment variables for Git subprocesses, and
 // configures the cfg, codehost, load, modfetch, and search packages for use
@@ -90,13 +89,13 @@ func Init() {
 	}
 	initialized = true
 
-	env := os.Getenv("GO111MODULE")
+	env := cfg.Getenv("GO111MODULE")
 	switch env {
 	default:
 		base.Fatalf("go: unknown environment setting GO111MODULE=%s", env)
-	case "auto":
+	case "auto", "":
 		mustUseModules = false
-	case "on", "":
+	case "on":
 		mustUseModules = true
 	case "off":
 		mustUseModules = false
@@ -134,28 +133,6 @@ func Init() {
 	cwd, err = os.Getwd()
 	if err != nil {
 		base.Fatalf("go: %v", err)
-	}
-
-	inGOPATH = false
-	for _, gopath := range filepath.SplitList(cfg.BuildContext.GOPATH) {
-		if gopath == "" {
-			continue
-		}
-		if search.InDir(cwd, filepath.Join(gopath, "src")) != "" {
-			inGOPATH = true
-			break
-		}
-	}
-
-	if inGOPATH && !mustUseModules {
-		if CmdModInit {
-			die() // Don't init a module that we're just going to ignore.
-		}
-		// No automatic enabling in GOPATH.
-		if root := findModuleRoot(cwd); root != "" {
-			cfg.GoModInGOPATH = filepath.Join(root, "go.mod")
-		}
-		return
 	}
 
 	if CmdModInit {
@@ -252,9 +229,11 @@ func Init() {
 func init() {
 	load.ModInit = Init
 
-	// Set modfetch.PkgMod unconditionally, so that go clean -modcache can run even without modules enabled.
+	// Set modfetch.PkgMod and codehost.WorkRoot unconditionally,
+	// so that go clean -modcache and go mod download can run even without modules enabled.
 	if list := filepath.SplitList(cfg.BuildContext.GOPATH); len(list) > 0 && list[0] != "" {
 		modfetch.PkgMod = filepath.Join(list[0], "pkg/mod")
+		codehost.WorkRoot = filepath.Join(list[0], "pkg/mod/cache/vcs")
 	}
 }
 
@@ -294,11 +273,8 @@ func die() {
 	if printStackInDie {
 		debug.PrintStack()
 	}
-	if os.Getenv("GO111MODULE") == "off" {
+	if cfg.Getenv("GO111MODULE") == "off" {
 		base.Fatalf("go: modules disabled by GO111MODULE=off; see 'go help modules'")
-	}
-	if inGOPATH && !mustUseModules {
-		base.Fatalf("go: modules disabled inside GOPATH/src by GO111MODULE=auto; see 'go help modules'")
 	}
 	if cwd != "" {
 		if dir, name := findAltConfig(cwd); dir != "" {
@@ -373,6 +349,7 @@ func InitMod() {
 		excluded[x.Mod] = true
 	}
 	modFileToBuildList()
+	stdVendorMode()
 	WriteGoMod()
 }
 
@@ -380,7 +357,7 @@ func InitMod() {
 func modFileToBuildList() {
 	Target = modFile.Module.Mod
 	targetPrefix = Target.Path
-	if search.InDir(cwd, cfg.GOROOTsrc) != "" {
+	if rel := search.InDir(cwd, cfg.GOROOTsrc); rel != "" {
 		targetInGorootSrc = true
 		if Target.Path == "std" {
 			targetPrefix = ""
@@ -392,6 +369,42 @@ func modFileToBuildList() {
 		list = append(list, r.Mod)
 	}
 	buildList = list
+}
+
+// stdVendorMode applies inside $GOROOT/src.
+// It checks that the go.mod matches vendor/modules.txt
+// and then sets -mod=vendor unless this is a command
+// that has to do explicitly with modules.
+func stdVendorMode() {
+	if !targetInGorootSrc {
+		return
+	}
+	if cfg.CmdName == "get" || strings.HasPrefix(cfg.CmdName, "mod ") {
+		return
+	}
+
+	readVendorList()
+BuildList:
+	for _, m := range buildList {
+		if m.Path == "cmd" || m.Path == "std" {
+			continue
+		}
+		for _, v := range vendorList {
+			if m.Path == v.Path {
+				if m.Version != v.Version {
+					base.Fatalf("go: inconsistent vendoring in %s:\n"+
+						"\tgo.mod requires %s %s but vendor/modules.txt has %s.\n"+
+						"\trun 'go mod tidy; go mod vendor' to sync",
+						modRoot, m.Path, m.Version, v.Version)
+				}
+				continue BuildList
+			}
+		}
+		base.Fatalf("go: inconsistent vendoring in %s:\n"+
+			"\tgo.mod requires %s %s but vendor/modules.txt does not include it.\n"+
+			"\trun 'go mod tidy; go mod vendor' to sync", modRoot, m.Path, m.Version)
+	}
+	cfg.BuildMod = "vendor"
 }
 
 // Allowed reports whether module m is allowed (not excluded) by the main module's go.mod.
@@ -408,9 +421,8 @@ func legacyModInit() {
 		fmt.Fprintf(os.Stderr, "go: creating new go.mod: module %s\n", path)
 		modFile = new(modfile.File)
 		modFile.AddModuleStmt(path)
+		AddGoStmt()
 	}
-
-	addGoStmt()
 
 	for _, name := range altConfigs {
 		cfg := filepath.Join(modRoot, name)
@@ -420,6 +432,7 @@ func legacyModInit() {
 			if convert == nil {
 				return
 			}
+			AddGoStmt()
 			fmt.Fprintf(os.Stderr, "go: copying requirements from %s\n", base.ShortPath(cfg))
 			cfg = filepath.ToSlash(cfg)
 			if err := modconv.ConvertLegacyConfig(modFile, cfg, data); err != nil {
@@ -434,8 +447,12 @@ func legacyModInit() {
 	}
 }
 
-// addGoStmt adds a go statement referring to the current version.
-func addGoStmt() {
+// AddGoStmt adds a go directive to the go.mod file if it does not already include one.
+// The 'go' version added, if any, is the latest version supported by this toolchain.
+func AddGoStmt() {
+	if modFile.Go != nil && modFile.Go.Version != "" {
+		return
+	}
 	tags := build.Default.ReleaseTags
 	version := tags[len(tags)-1]
 	if !strings.HasPrefix(version, "go") || !modfile.GoVersionRE.MatchString(version[2:]) {
@@ -508,7 +525,8 @@ func findModulePath(dir string) (string, error) {
 	// TODO(bcmills): once we have located a plausible module path, we should
 	// query version control (if available) to verify that it matches the major
 	// version of the most recent tag.
-	// See https://golang.org/issue/29433 and https://golang.org/issue/27009.
+	// See https://golang.org/issue/29433, https://golang.org/issue/27009, and
+	// https://golang.org/issue/31549.
 
 	// Cast about for import comments,
 	// first in top-level directory, then in subdirectories.
@@ -559,17 +577,18 @@ func findModulePath(dir string) (string, error) {
 		}
 	}
 
-	// Look for .git/config with github origin as last resort.
-	data, _ = ioutil.ReadFile(filepath.Join(dir, ".git/config"))
-	if m := gitOriginRE.FindSubmatch(data); m != nil {
-		return "github.com/" + string(m[1]), nil
-	}
+	msg := `cannot determine module path for source directory %s (outside GOPATH, module path must be specified)
 
-	return "", fmt.Errorf("cannot determine module path for source directory %s (outside GOPATH, module path not specified)", dir)
+Example usage:
+	'go mod init example.com/m' to initialize a v0 or v1 module
+	'go mod init example.com/m/v2' to initialize a v2 module
+
+Run 'go help mod init' for more information.
+`
+	return "", fmt.Errorf(msg, dir)
 }
 
 var (
-	gitOriginRE     = lazyregexp.New(`(?m)^\[remote "origin"\]\r?\n\turl = (?:https://github.com/|git@github.com:|gh:)([^/]+/[^/]+?)(\.git)?\r?\n`)
 	importCommentRE = lazyregexp.New(`(?m)^package[ \t]+[^ \t\r\n/]+[ \t]+//[ \t]+import[ \t]+(\"[^"]+\")[ \t]*\r?\n`)
 )
 
@@ -656,17 +675,20 @@ func WriteGoMod() {
 		base.Fatalf("go: %v", err)
 	}
 
+	dirty := !bytes.Equal(new, modFileData)
+	if dirty && cfg.BuildMod == "readonly" {
+		// If we're about to fail due to -mod=readonly,
+		// prefer to report a dirty go.mod over a dirty go.sum
+		base.Fatalf("go: updates to go.mod needed, disabled by -mod=readonly")
+	}
 	// Always update go.sum, even if we didn't change go.mod: we may have
 	// downloaded modules that we didn't have before.
 	modfetch.WriteGoSum()
 
-	if bytes.Equal(new, modFileData) {
+	if !dirty {
 		// We don't need to modify go.mod from what we read previously.
 		// Ignore any intervening edits.
 		return
-	}
-	if cfg.BuildMod == "readonly" {
-		base.Fatalf("go: updates to go.mod needed, disabled by -mod=readonly")
 	}
 
 	unlock := modfetch.SideLock()
@@ -693,7 +715,7 @@ func WriteGoMod() {
 
 	}
 
-	if err := renameio.WriteFile(file, new); err != nil {
+	if err := renameio.WriteFile(file, new, 0666); err != nil {
 		base.Fatalf("error writing go.mod: %v", err)
 	}
 	modFileData = new

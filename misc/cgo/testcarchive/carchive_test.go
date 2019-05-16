@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"debug/elf"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -36,6 +37,11 @@ var GOOS, GOARCH, GOPATH string
 var libgodir string
 
 func TestMain(m *testing.M) {
+	flag.Parse()
+	if testing.Short() && os.Getenv("GO_BUILDER_NAME") == "" {
+		fmt.Printf("SKIP - short mode and $GO_BUILDER_NAME not set\n")
+		os.Exit(0)
+	}
 	log.SetFlags(log.Lshortfile)
 	os.Exit(testMain(m))
 }
@@ -124,7 +130,7 @@ func testMain(m *testing.M) int {
 			if GOARCH == "arm" || GOARCH == "arm64" {
 				libbase += "_shared"
 			}
-		case "dragonfly", "freebsd", "linux", "netbsd", "openbsd", "solaris":
+		case "dragonfly", "freebsd", "linux", "netbsd", "openbsd", "solaris", "illumos":
 			libbase += "_shared"
 		}
 	}
@@ -524,6 +530,9 @@ func TestExtar(t *testing.T) {
 	}
 	if runtime.Compiler == "gccgo" {
 		t.Skip("skipping -extar test when using gccgo")
+	}
+	if runtime.GOOS == "darwin" && (runtime.GOARCH == "arm" || runtime.GOARCH == "arm64") {
+		t.Skip("shell scripts are not executable on iOS hosts")
 	}
 
 	defer func() {

@@ -26,7 +26,7 @@ var GccgoName, GccgoBin string
 var gccgoErr error
 
 func init() {
-	GccgoName = os.Getenv("GCCGO")
+	GccgoName = cfg.Getenv("GCCGO")
 	if GccgoName == "" {
 		GccgoName = "gccgo"
 	}
@@ -44,7 +44,7 @@ func (gccgoToolchain) linker() string {
 }
 
 func (gccgoToolchain) ar() string {
-	ar := os.Getenv("AR")
+	ar := cfg.Getenv("AR")
 	if ar == "" {
 		ar = "ar"
 	}
@@ -94,7 +94,7 @@ func (tools gccgoToolchain) gc(b *Builder, a *Action, archive string, importcfg 
 		args = append(args, mkAbs(p.Dir, f))
 	}
 
-	output, err = b.runOut(p.Dir, nil, args)
+	output, err = b.runOut(a, p.Dir, nil, args)
 	return ofile, output, err
 }
 
@@ -479,7 +479,7 @@ func (tools gccgoToolchain) link(b *Builder, root *Action, out, importcfg string
 			ldflags = append(ldflags, "-lobjc")
 		}
 		if fortran {
-			fc := os.Getenv("FC")
+			fc := cfg.Getenv("FC")
 			if fc == "" {
 				fc = "gfortran"
 			}

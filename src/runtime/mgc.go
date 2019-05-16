@@ -202,10 +202,14 @@ func readgogc() int32 {
 
 // gcenable is called after the bulk of the runtime initialization,
 // just before we're about to start letting user code run.
-// It kicks off the background sweeper goroutine and enables GC.
+// It kicks off the background sweeper goroutine, the background
+// scavenger goroutine, and enables GC.
 func gcenable() {
-	c := make(chan int, 1)
+	// Kick off sweeping and scavenging.
+	c := make(chan int, 2)
 	go bgsweep(c)
+	go bgscavenge(c)
+	<-c
 	<-c
 	memstats.enablegc = true // now that runtime is initialized, GC is okay
 }
@@ -850,6 +854,8 @@ func gcSetTriggerRatio(triggerRatio float64) {
 			atomic.Store64(&mheap_.pagesSweptBasis, pagesSwept)
 		}
 	}
+
+	gcPaceScavenger()
 }
 
 // gcEffectiveGrowthRatio returns the current effective heap growth
@@ -1985,7 +1991,6 @@ func gcMarkWorkAvailable(p *p) bool {
 // gcMark runs the mark (or, for concurrent GC, mark termination)
 // All gcWork caches must be empty.
 // STW is in effect at this point.
-//TODO go:nowritebarrier
 func gcMark(start_time int64) {
 	if debug.allocfreetrace > 0 {
 		tracegc()

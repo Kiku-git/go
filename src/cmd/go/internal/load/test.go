@@ -91,13 +91,20 @@ func TestPackagesFor(p *Package, cover *TestCover) (pmain, ptest, pxtest *Packag
 // The caller is expected to have checked that len(p.TestGoFiles)+len(p.XTestGoFiles) > 0,
 // or else there's no point in any of this.
 func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *Package) {
+	pre := newPreload()
+	defer pre.flush()
+	allImports := append([]string{}, p.TestImports...)
+	allImports = append(allImports, p.XTestImports...)
+	pre.preloadImports(allImports, p.Internal.Build)
+
 	var ptestErr, pxtestErr *PackageError
 	var imports, ximports []*Package
 	var stk ImportStack
 	stk.Push(p.ImportPath + " (test)")
 	rawTestImports := str.StringList(p.TestImports)
+	var ptestImportsTesting, pxtestImportsTesting bool
 	for i, path := range p.TestImports {
-		p1 := LoadImport(path, p.Dir, p, &stk, p.Internal.Build.TestImportPos[path], ResolveImport)
+		p1 := loadImport(pre, path, p.Dir, p, &stk, p.Internal.Build.TestImportPos[path], ResolveImport)
 		if str.Contains(p1.Deps, p.ImportPath) || p1.ImportPath == p.ImportPath {
 			// Same error that loadPackage returns (via reusePackage) in pkg.go.
 			// Can't change that code, because that code is only for loading the
@@ -110,19 +117,25 @@ func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *
 		}
 		p.TestImports[i] = p1.ImportPath
 		imports = append(imports, p1)
+		if path == "testing" {
+			ptestImportsTesting = true
+		}
 	}
 	stk.Pop()
 	stk.Push(p.ImportPath + "_test")
 	pxtestNeedsPtest := false
 	rawXTestImports := str.StringList(p.XTestImports)
 	for i, path := range p.XTestImports {
-		p1 := LoadImport(path, p.Dir, p, &stk, p.Internal.Build.XTestImportPos[path], ResolveImport)
+		p1 := loadImport(pre, path, p.Dir, p, &stk, p.Internal.Build.XTestImportPos[path], ResolveImport)
 		if p1.ImportPath == p.ImportPath {
 			pxtestNeedsPtest = true
 		} else {
 			ximports = append(ximports, p1)
 		}
 		p.XTestImports[i] = p1.ImportPath
+		if path == "testing" {
+			pxtestImportsTesting = true
+		}
 	}
 	stk.Pop()
 
@@ -132,6 +145,9 @@ func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *
 		*ptest = *p
 		ptest.Error = ptestErr
 		ptest.ForTest = p.ImportPath
+		if ptestImportsTesting {
+			ptest.Internal.TestinginitGo = formatTestinginit(p)
+		}
 		ptest.GoFiles = nil
 		ptest.GoFiles = append(ptest.GoFiles, p.GoFiles...)
 		ptest.GoFiles = append(ptest.GoFiles, p.TestGoFiles...)
@@ -176,6 +192,7 @@ func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *
 				ImportPath: p.ImportPath + "_test",
 				Root:       p.Root,
 				Dir:        p.Dir,
+				Goroot:     p.Goroot,
 				GoFiles:    p.XTestGoFiles,
 				Imports:    p.XTestImports,
 				ForTest:    p.ImportPath,
@@ -194,6 +211,9 @@ func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *
 				Ldflags:    p.Internal.Ldflags,
 				Gccgoflags: p.Internal.Gccgoflags,
 			},
+		}
+		if pxtestImportsTesting {
+			pxtest.Internal.TestinginitGo = formatTestinginit(pxtest)
 		}
 		if pxtestNeedsPtest {
 			pxtest.Internal.Imports = append(pxtest.Internal.Imports, ptest)
@@ -232,7 +252,7 @@ func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *
 		if dep == ptest.ImportPath {
 			pmain.Internal.Imports = append(pmain.Internal.Imports, ptest)
 		} else {
-			p1 := LoadImport(dep, "", nil, &stk, nil, 0)
+			p1 := loadImport(pre, dep, "", nil, &stk, nil, 0)
 			pmain.Internal.Imports = append(pmain.Internal.Imports, p1)
 		}
 	}
@@ -317,9 +337,7 @@ func TestPackagesAndErrors(p *Package, cover *TestCover) (pmain, ptest, pxtest *
 	if err != nil && pmain.Error == nil {
 		pmain.Error = &PackageError{Err: err.Error()}
 	}
-	if data != nil {
-		pmain.Internal.TestmainGo = &data
-	}
+	pmain.Internal.TestmainGo = data
 
 	return pmain, ptest, pxtest
 }
@@ -347,9 +365,10 @@ Search:
 // preal, packages that import the package under test should get ptest instead
 // of preal. This is particularly important if pxtest depends on functionality
 // exposed in test sources in ptest. Second, if there is a main package
-// (other than pmain) anywhere, we need to clear p.Internal.BuildInfo in
-// the test copy to prevent link conflicts. This may happen if both -coverpkg
-// and the command line patterns include multiple main packages.
+// (other than pmain) anywhere, we need to set p.Internal.ForceLibrary and
+// clear p.Internal.BuildInfo in the test copy to prevent link conflicts.
+// This may happen if both -coverpkg and the command line patterns include
+// multiple main packages.
 func recompileForTest(pmain, preal, ptest, pxtest *Package) {
 	// The "test copy" of preal is ptest.
 	// For each package that depends on preal, make a "test copy"
@@ -380,6 +399,7 @@ func recompileForTest(pmain, preal, ptest, pxtest *Package) {
 			p = p1
 			p.Target = ""
 			p.Internal.BuildInfo = ""
+			p.Internal.ForceLibrary = true
 		}
 
 		// Update p.Internal.Imports to use test copies.
@@ -463,6 +483,15 @@ func loadTestFuncs(ptest *Package) (*testFuncs, error) {
 		}
 	}
 	return t, err
+}
+
+// formatTestinginit returns the content of the _testinginit.go file for p.
+func formatTestinginit(p *Package) []byte {
+	var buf bytes.Buffer
+	if err := testinginitTmpl.Execute(&buf, p); err != nil {
+		panic("testinginit template execution failed") // shouldn't be possible
+	}
+	return buf.Bytes()
 }
 
 // formatTestmain returns the content of the _testmain.go file for t.
@@ -594,7 +623,26 @@ func checkTestFunc(fn *ast.FuncDecl, arg string) error {
 	return nil
 }
 
+var testinginitTmpl = lazytemplate.New("init", `
+package {{.Name}}
+
+import _go_testing "testing"
+
+{{/*
+Call testing.Init before any other user initialization code runs.
+(This file is passed to the compiler first.)
+This provides the illusion of the old behavior where testing flags
+were registered as part of the testing package's initialization.
+*/}}
+var _ = func() bool {
+	_go_testing.Init()
+	return true
+}()
+`)
+
 var testmainTmpl = lazytemplate.New("main", `
+// Code generated by 'go test'. DO NOT EDIT.
+
 package main
 
 import (

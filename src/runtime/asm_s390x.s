@@ -775,14 +775,11 @@ TEXT _cgo_topofstack(SB),NOSPLIT|NOFRAME,$0
 
 // The top-most function running on a goroutine
 // returns to goexit+PCQuantum.
-TEXT runtime·goexit(SB),NOSPLIT|NOFRAME,$0-0
+TEXT runtime·goexit(SB),NOSPLIT|NOFRAME|TOPFRAME,$0-0
 	BYTE $0x07; BYTE $0x00; // 2-byte nop
 	BL	runtime·goexit1(SB)	// does not return
 	// traceback from goexit1 must hit code range of goexit
 	BYTE $0x07; BYTE $0x00; // 2-byte nop
-
-TEXT runtime·sigreturn(SB),NOSPLIT,$0-0
-	RET
 
 TEXT ·publicationBarrier(SB),NOSPLIT|NOFRAME,$0-0
         // Stores are already ordered on s390x, so this is just a

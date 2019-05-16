@@ -1,4 +1,4 @@
-// errorcheck -0 -m -l
+// errorcheck -0 -m -l -newescape=true
 
 // Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
@@ -110,8 +110,7 @@ func efaceEscape1() {
 	{
 		i := 0         // ERROR "moved to heap: i"
 		v := M1{&i, 0}
-		// BAD: v does not escape to heap here
-		var x M = v // ERROR "v escapes to heap"
+		var x M = v // ERROR "efaceEscape1 v does not escape"
 		v1 := x.(M1)
 		sink = v1 // ERROR "v1 escapes to heap"
 	}

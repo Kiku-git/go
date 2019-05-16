@@ -6,8 +6,6 @@ package main_test
 
 import (
 	"bytes"
-	"cmd/go/internal/cache"
-	"cmd/internal/sys"
 	"context"
 	"debug/elf"
 	"debug/macho"
@@ -28,6 +26,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"cmd/go/internal/cache"
+	"cmd/go/internal/cfg"
+	"cmd/internal/sys"
 )
 
 var (
@@ -119,6 +121,8 @@ var testCtx = context.Background()
 // The TestMain function creates a go command for testing purposes and
 // deletes it after the tests have been run.
 func TestMain(m *testing.M) {
+	// $GO_GCFLAGS a compiler debug flag known to cmd/dist, make.bash, etc.
+	// It is not a standard go command flag; use os.Getenv, not cfg.Getenv.
 	if os.Getenv("GO_GCFLAGS") != "" {
 		fmt.Fprintf(os.Stderr, "testing: warning: no tests to run\n") // magic string for cmd/go
 		fmt.Printf("cmd/go test is not compatible with $GO_GCFLAGS being set\n")
@@ -256,6 +260,7 @@ func TestMain(m *testing.M) {
 		}
 	}
 	// Don't let these environment variables confuse the test.
+	os.Setenv("GOENV", "off")
 	os.Unsetenv("GOBIN")
 	os.Unsetenv("GOPATH")
 	os.Unsetenv("GIT_ALLOW_PROTOCOL")
@@ -264,7 +269,7 @@ func TestMain(m *testing.M) {
 	// Setting HOME to a non-existent directory will break
 	// those systems. Disable ccache and use real compiler. Issue 17668.
 	os.Setenv("CCACHE_DISABLE", "1")
-	if os.Getenv("GOCACHE") == "" {
+	if cfg.Getenv("GOCACHE") == "" {
 		os.Setenv("GOCACHE", testGOCACHE) // because $HOME is gone
 	}
 
@@ -1893,6 +1898,7 @@ func TestGoListTest(t *testing.T) {
 }
 
 func TestGoListCompiledCgo(t *testing.T) {
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
@@ -2532,6 +2538,7 @@ func TestCoverageRuns(t *testing.T) {
 
 func TestCoverageDotImport(t *testing.T) {
 	skipIfGccgo(t, "gccgo has no cover tool")
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
@@ -2711,6 +2718,7 @@ func TestCoverageFunc(t *testing.T) {
 // Issue 24588.
 func TestCoverageDashC(t *testing.T) {
 	skipIfGccgo(t, "gccgo has no cover tool")
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
@@ -3386,6 +3394,7 @@ func TestVetWithOnlyCgoFiles(t *testing.T) {
 	if !canCgo {
 		t.Skip("skipping because cgo not enabled")
 	}
+	tooSlow(t)
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -3405,22 +3414,6 @@ func TestGoGetDotSlashDownload(t *testing.T) {
 	tg.setenv("GOPATH", tg.path("."))
 	tg.cd(tg.path("src/rsc.io"))
 	tg.run("get", "./pprof_mac_fix")
-}
-
-// Issue 13037: Was not parsing <meta> tags in 404 served over HTTPS
-func TestGoGetHTTPS404(t *testing.T) {
-	testenv.MustHaveExternalNetwork(t)
-	switch runtime.GOOS {
-	case "darwin", "linux", "freebsd":
-	default:
-		t.Skipf("test case does not work on %s", runtime.GOOS)
-	}
-
-	tg := testgo(t)
-	defer tg.cleanup()
-	tg.tempDir("src")
-	tg.setenv("GOPATH", tg.path("."))
-	tg.run("get", "bazil.org/fuse/fs/fstestutil")
 }
 
 // Test that you cannot import a main package.
@@ -3637,7 +3630,7 @@ func TestImportLocal(t *testing.T) {
 		var _ = x.X
 	`)
 	tg.runFail("build", "dir/x")
-	tg.grepStderr("local import.*in non-local package", "did not diagnose local import")
+	tg.grepStderr("cannot import current directory", "did not diagnose import current directory")
 
 	// ... even in a test.
 	tg.tempFile("src/dir/x/xx.go", `package x
@@ -3650,7 +3643,7 @@ func TestImportLocal(t *testing.T) {
 	`)
 	tg.run("build", "dir/x")
 	tg.runFail("test", "dir/x")
-	tg.grepStderr("local import.*in non-local package", "did not diagnose local import")
+	tg.grepStderr("cannot import current directory", "did not diagnose import current directory")
 
 	// ... even in an xtest.
 	tg.tempFile("src/dir/x/xx.go", `package x
@@ -3663,7 +3656,7 @@ func TestImportLocal(t *testing.T) {
 	`)
 	tg.run("build", "dir/x")
 	tg.runFail("test", "dir/x")
-	tg.grepStderr("local import.*in non-local package", "did not diagnose local import")
+	tg.grepStderr("cannot import current directory", "did not diagnose import current directory")
 }
 
 func TestGoGetInsecure(t *testing.T) {
@@ -4144,7 +4137,7 @@ func TestCgoConsistentResults(t *testing.T) {
 		t.Skip("skipping because cgo not enabled")
 	}
 	switch runtime.GOOS {
-	case "solaris":
+	case "solaris", "illumos":
 		testenv.SkipFlaky(t, 13247)
 	}
 
@@ -4655,7 +4648,7 @@ func TestBuildTagsNoComma(t *testing.T) {
 	tg.makeTempdir()
 	tg.setenv("GOPATH", tg.path("go"))
 	tg.run("build", "-tags", "tag1 tag2", "math")
-	tg.runFail("build", "-tags", "tag1,tag2", "math")
+	tg.runFail("build", "-tags", "tag1,tag2 tag3", "math")
 	tg.grepBoth("space-separated list contains comma", "-tags with a comma-separated list didn't error")
 }
 
@@ -5274,8 +5267,14 @@ func TestCacheVet(t *testing.T) {
 	if strings.Contains(os.Getenv("GODEBUG"), "gocacheverify") {
 		t.Skip("GODEBUG gocacheverify")
 	}
-	if os.Getenv("GOCACHE") == "off" {
-		tooSlow(t)
+	if testing.Short() {
+		// In short mode, reuse cache.
+		// Test failures may be masked if the cache has just the right entries already
+		// (not a concern during all.bash, which runs in a clean cache).
+		if cfg.Getenv("GOCACHE") == "off" {
+			tooSlow(t)
+		}
+	} else {
 		tg.makeTempdir()
 		tg.setenv("GOCACHE", tg.path("cache"))
 	}
@@ -5659,6 +5658,7 @@ func TestTestSkipVetAfterFailedBuild(t *testing.T) {
 }
 
 func TestTestVetRebuild(t *testing.T) {
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
@@ -5938,6 +5938,7 @@ func TestBadCgoDirectives(t *testing.T) {
 	if !canCgo {
 		t.Skip("no cgo")
 	}
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 
@@ -6052,6 +6053,7 @@ func TestTwoPkgConfigs(t *testing.T) {
 	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" {
 		t.Skipf("no shell scripts on %s", runtime.GOOS)
 	}
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
@@ -6082,6 +6084,8 @@ func TestCgoCache(t *testing.T) {
 	if !canCgo {
 		t.Skip("no cgo")
 	}
+	tooSlow(t)
+
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
@@ -6132,6 +6136,7 @@ func TestLinkerTmpDirIsDeleted(t *testing.T) {
 	if !canCgo {
 		t.Skip("skipping because cgo not enabled")
 	}
+	tooSlow(t)
 
 	tg := testgo(t)
 	defer tg.cleanup()
@@ -6221,6 +6226,7 @@ func TestGoTestWithoutTests(t *testing.T) {
 
 // Issue 25579.
 func TestGoBuildDashODevNull(t *testing.T) {
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()
@@ -6233,6 +6239,7 @@ func TestGoBuildDashODevNull(t *testing.T) {
 // Issue 25093.
 func TestCoverpkgTestOnly(t *testing.T) {
 	skipIfGccgo(t, "gccgo has no cover tool")
+	tooSlow(t)
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.parallel()

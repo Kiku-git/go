@@ -864,7 +864,7 @@ TEXT _cgo_topofstack(SB),NOSPLIT,$8
 
 // The top-most function running on a goroutine
 // returns to goexit+PCQuantum.
-TEXT runtime·goexit(SB),NOSPLIT|NOFRAME,$0-0
+TEXT runtime·goexit(SB),NOSPLIT|NOFRAME|TOPFRAME,$0-0
 	MOVW	R0, R0	// NOP
 	BL	runtime·goexit1(SB)	// does not return
 	// traceback from goexit1 must hit code range of goexit
@@ -891,12 +891,9 @@ TEXT runtime·usplitR0(SB),NOSPLIT,$0
 	SUB	R1, R3, R1
 	RET
 
-TEXT runtime·sigreturn(SB),NOSPLIT,$0-0
-	RET
-
 #ifndef GOOS_nacl
 // This is called from .init_array and follows the platform, not Go, ABI.
-TEXT runtime·addmoduledata(SB),NOSPLIT,$0-8
+TEXT runtime·addmoduledata(SB),NOSPLIT,$0-0
 	MOVW	R9, saver9-4(SP) // The access to global variables below implicitly uses R9, which is callee-save
 	MOVW	R11, saver11-8(SP) // Likewise, R11 is the temp register, but callee-save in C ABI
 	MOVW	runtime·lastmoduledatap(SB), R1

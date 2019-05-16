@@ -89,6 +89,7 @@ var bootstrapDirs = []string{
 	"debug/elf",
 	"debug/macho",
 	"debug/pe",
+	"internal/goversion",
 	"internal/xcoff",
 	"math/big",
 	"math/bits",
@@ -127,6 +128,7 @@ func bootstrapBuildTools() {
 	// but it is easier to debug on failure if the files are in a known location.
 	workspace := pathf("%s/pkg/bootstrap", goroot)
 	xremoveall(workspace)
+	xatexit(func() { xremoveall(workspace) })
 	base := pathf("%s/src/bootstrap", workspace)
 	xmkdirall(base)
 
